@@ -1,56 +1,24 @@
 import os
 import json
+import datetime
 from garminconnect import Garmin
 from google.oauth2.service_account import Credentials
 import gspread
-from datetime import datetime, timedelta
-
-# Load environment variables from .env file if it exists (for local testing)
-if os.path.exists('.env'):
-    try:
-        from dotenv import load_dotenv
-        load_dotenv()
-    except ImportError:
-        print("Warning: python-dotenv not installed. Install with: pip install python-dotenv")
-        pass
-
-def format_duration(seconds):
-    """Convert seconds to minutes (rounded to 2 decimals)"""
-    return round(seconds / 60, 2) if seconds else 0
-
-def format_pace(distance_meters, duration_seconds):
-    """Calculate pace in min/km"""
-    if not distance_meters or not duration_seconds:
-        return 0
-    distance_km = distance_meters / 1000
-    pace_seconds = duration_seconds / distance_km
-    return round(pace_seconds / 60, 2)  # Convert to min/km
 
 def main():
-    print("Starting Garmin running activities sync...")
+    print("Starting Garmin Wellness & Activity sync...")
     
-    # Get credentials from environment variables
+    # 1. Get credentials
     garmin_email = os.environ.get('GARMIN_EMAIL')
     garmin_password = os.environ.get('GARMIN_PASSWORD')
     google_creds_json = os.environ.get('GOOGLE_CREDENTIALS')
-    sheet_id = os.environ.get('SHEET_ID')  # Add sheet ID from environment
-    
-    # For local testing: try to load from credentials.json file
-    if not google_creds_json and os.path.exists('credentials.json'):
-        print("Loading Google credentials from credentials.json...")
-        with open('credentials.json', 'r') as f:
-            google_creds_json = f.read()
+    sheet_id = os.environ.get('SHEET_ID')
     
     if not all([garmin_email, garmin_password, google_creds_json, sheet_id]):
         print("❌ Missing required environment variables")
-        print(f"   GARMIN_EMAIL: {'✓' if garmin_email else '✗'}")
-        print(f"   GARMIN_PASSWORD: {'✓' if garmin_password else '✗'}")
-        print(f"   GOOGLE_CREDENTIALS: {'✓' if google_creds_json else '✗'}")
-        print(f"   SHEET_ID: {'✓' if sheet_id else '✗'}")
         return
-    
-    # Connect to Garmin
-    print("Connecting to Garmin...")
+
+    # 2. Connect to Garmin
     try:
         garmin = Garmin(garmin_email, garmin_password)
         garmin.login()
@@ -58,68 +26,29 @@ def main():
     except Exception as e:
         print(f"❌ Failed to connect to Garmin: {e}")
         return
-    
-    # Get recent activities (last 7 days)
-    print("Fetching recent activities...")
-    try:
-        activities = garmin.get_activities(0, 20)  # Get last 20 activities
-        print(f"Found {len(activities)} total activities")
-    except Exception as e:
-        print(f"❌ Failed to fetch activities: {e}")
-        return
-    
-    # Filter for running activities only
-    running_activities = [
-        activity for activity in activities 
-        if activity.get('activityType', {}).get('typeKey', '').lower() in ['running', 'treadmill_running', 'trail_running']
-    ]
-    
-    print(f"Found {len(running_activities)} running activities")
-    
-    if not running_activities:
-        print("No running activities found in recent data")
-        return
-    
-    # Connect to Google Sheets
-    print("Connecting to Google Sheets...")
+
+    # 3. Connect to Google Sheets
     try:
         creds_dict = json.loads(google_creds_json)
         creds = Credentials.from_service_account_info(
             creds_dict,
-            scopes=[
-                'https://www.googleapis.com/auth/spreadsheets',
-                'https://www.googleapis.com/auth/drive'
-            ]
+            scopes=['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
         )
-        client = gspread.authorize(creds)
-        sheet = client.open("Garmin Data").sheet1
+        gc = gspread.authorize(creds)
+        # Opens the specific tab named "Garmin Data"
+        sheet = gc.open_by_key(sheet_id).worksheet("Garmin Data")
         print("✅ Connected to Google Sheets")
     except Exception as e:
         print(f"❌ Failed to connect to Google Sheets: {e}")
         return
-    
-    # Get existing dates to avoid duplicates
-    try:
-        existing_data = sheet.get_all_values()
-        existing_dates = set()
-        if len(existing_data) > 1:  # If there's data beyond headers
-            for row in existing_data[1:]:  # Skip header row
-                if row and row[0]:  # If date column exists
-                    existing_dates.add(row[0])
-        print(f"Found {len(existing_dates)} existing entries")
-    except Exception as e:
-        print(f"Warning: Could not check existing data: {e}")
-        existing_dates = set()
-    
-    # 1. Fetch General Activities (BJJ, Weights, etc.)
-    all_activities = client.get_activities(0, 10) # Gets last 10 activities of any type
 
-    # 2. Fetch Wellness Data for today
+    # 4. Fetch Wellness Data for today
     today = datetime.date.today().isoformat()
+    print(f"Fetching wellness stats for {today}...")
     try:
-        stats = client.get_stats(today)
-        sleep_data = client.get_sleep_data(today)
-        hrv_data = client.get_hrv_data(today)
+        stats = garmin.get_stats(today)
+        sleep_data = garmin.get_sleep_data(today)
+        hrv_data = garmin.get_hrv_data(today)
         
         sleep_score = sleep_data.get('dailySleepDTO', {}).get('sleepScore', 0)
         hrv_val = hrv_data.get('hrvSummary', {}).get('lastNightAvg', 0)
@@ -127,62 +56,35 @@ def main():
     except:
         sleep_score, hrv_val, rhr_val = 0, 0, 0
 
-    # 3. Process Activities
-    new_entries = 0
-    for activity in all_activities:
-        try:
-            activity_date = activity.get('startTimeLocal', '')[:10]
-            
-            if activity_date in existing_dates:
-                continue
-            
-            # Extract metrics
-            activity_name = activity.get('activityName', 'Activity')
-            distance_km = round(activity.get('distance', 0) / 1000, 2)
-            duration_min = round(activity.get('duration', 0) / 60, 1)
-            avg_hr = activity.get('averageHR', 0) or 0
-            max_hr = activity.get('maxHR', 0) or 0
-            calories = activity.get('calories', 0) or 0
-            activity_type = activity.get('activityType', {}).get('typeKey', 'other')
-
-            # Create the row matching your new headers
-            new_row = [
-                activity_date, activity_name, distance_km, duration_min, 
-                avg_hr, max_hr, calories, activity_type, 
-                sleep_score, hrv_val, rhr_val
-            ]
-            
-            sheet.append_row(new_row)
-            new_entries += 1
-            
-            # Prepare row
-            row = [
-                activity_date,
-                activity_name,
-                distance_km,
-                duration_min,
-                avg_pace,
-                avg_hr,
-                max_hr,
-                calories,
-                avg_cadence,
-                elevation_gain,
-                activity_type
-            ]
-            
-            # Append to sheet
-            sheet.append_row(row)
-            print(f"✅ Added: {activity_date} - {activity_name} ({distance_km} km)")
-            new_entries += 1
-            
-        except Exception as e:
-            print(f"❌ Error processing activity: {e}")
-            continue
+    # 5. Fetch and Process last 10 Activities
+    activities = garmin.get_activities(0, 10)
+    existing_dates = set(sheet.col_values(1)) # Check column A for existing dates
     
-    if new_entries > 0:
-        print(f"\n🎉 Successfully added {new_entries} new running activities!")
-    else:
-        print("\n✓ No new activities to add")
+    new_entries = 0
+    for activity in activities:
+        activity_date = activity.get('startTimeLocal', '')[:10]
+        
+        if activity_date in existing_dates:
+            continue
+            
+        activity_name = activity.get('activityName', 'Activity')
+        distance_km = round(activity.get('distance', 0) / 1000, 2)
+        duration_min = round(activity.get('duration', 0) / 60, 1)
+        avg_hr = activity.get('averageHR', 0) or 0
+        calories = activity.get('calories', 0) or 0
+        activity_type = activity.get('activityType', {}).get('typeKey', 'other')
+
+        # Row matches: Date, Name, Distance, Duration, HR, Calories, Type, Sleep, HRV, RHR
+        new_row = [
+            activity_date, activity_name, distance_km, duration_min, 
+            avg_hr, calories, activity_type, sleep_score, hrv_val, rhr_val
+        ]
+        
+        sheet.append_row(new_row)
+        print(f"✅ Logged: {activity_date} - {activity_name}")
+        new_entries += 1
+
+    print(f"\nDone! Added {new_entries} new entries.")
 
 if __name__ == "__main__":
     main()
