@@ -18,16 +18,8 @@ def main():
         print("❌ Missing required environment variables")
         return
 
-    # 2. Connect to Garmin
-    try:
-        garmin = Garmin(garmin_email, garmin_password)
-        garmin.login()
-        print("✅ Connected to Garmin")
-    except Exception as e:
-        print(f"❌ Failed to connect to Garmin: {e}")
-        return
-
-    # 3. Connect to Google Sheets
+    # 2. Connect to Google Sheets
+    print("Connecting to Google Sheets...")
     try:
         creds_dict = json.loads(google_creds_json)
         creds = Credentials.from_service_account_info(
@@ -35,55 +27,42 @@ def main():
             scopes=['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
         )
         gc = gspread.authorize(creds)
-        # Opens the specific tab named "Garmin Data"
-        sheet = gc.open_by_key(sheet_id).get_worksheet(0)
-        print("✅ Connected to Google Sheets")
+        
+        # Open the spreadsheet
+        doc = gc.open_by_key(sheet_id)
+        
+        # USE THE FIRST TAB NO MATTER WHAT IT IS NAMED
+        sheet = doc.get_worksheet(0) 
+        print(f"✅ Connected to Sheet: {doc.title}, Tab: {sheet.title}")
     except Exception as e:
-        print(f"❌ Failed to connect to Google Sheets: {e}")
+        print(f"❌ Failed to connect: {e}")
         return
 
-    # 4. Fetch Wellness Data for today
-    today = datetime.date.today().isoformat()
-    print(f"Fetching wellness stats for {today}...")
-    try:
-        stats = garmin.get_stats(today)
-        sleep_data = garmin.get_sleep_data(today)
-        hrv_data = garmin.get_hrv_data(today)
-        
-        sleep_score = sleep_data.get('dailySleepDTO', {}).get('sleepScore', 0)
-        hrv_val = hrv_data.get('hrvSummary', {}).get('lastNightAvg', 0)
-        rhr_val = stats.get('restingHeartRate', 0)
-    except:
-        sleep_score, hrv_val, rhr_val = 0, 0, 0
-
-    # 5. Fetch and Process last 10 Activities
+    # Fetch and Process last 10 Activities
     activities = garmin.get_activities(0, 10)
-    existing_dates = set(sheet.col_values(1)) # Check column A for existing dates
+    
+    # Get all dates currently in Column A to avoid duplicates
+    existing_dates = sheet.col_values(1)
     
     new_entries = 0
     for activity in activities:
         activity_date = activity.get('startTimeLocal', '')[:10]
-        
         if activity_date in existing_dates:
             continue
             
-        activity_name = activity.get('activityName', 'Activity')
-        distance_km = round(activity.get('distance', 0) / 1000, 2)
-        duration_min = round(activity.get('duration', 0) / 60, 1)
-        avg_hr = activity.get('averageHR', 0) or 0
-        calories = activity.get('calories', 0) or 0
-        activity_type = activity.get('activityType', {}).get('typeKey', 'other')
-
-        # Row matches: Date, Name, Distance, Duration, HR, Calories, Type, Sleep, HRV, RHR
         new_row = [
-            activity_date, activity_name, distance_km, duration_min, 
-            avg_hr, calories, activity_type, sleep_score, hrv_val, rhr_val
+            activity_date, 
+            activity.get('activityName', 'Activity'),
+            round(activity.get('distance', 0) / 1000, 2),
+            round(activity.get('duration', 0) / 60, 1),
+            activity.get('averageHR', 0),
+            activity.get('calories', 0),
+            activity.get('activityType', {}).get('typeKey', 'other')
         ]
         
         sheet.append_row(new_row)
-        print(f"✅ Logged: {activity_date} - {activity_name}")
+        print(f"✅ Added: {activity_date}")
         new_entries += 1
-
     print(f"\nDone! Added {new_entries} new entries.")
 
 if __name__ == "__main__":
