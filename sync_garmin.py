@@ -111,31 +111,49 @@ def main():
         print(f"Warning: Could not check existing data: {e}")
         existing_dates = set()
     
-    # Process each running activity
+    # 1. Fetch General Activities (BJJ, Weights, etc.)
+    all_activities = client.get_activities(0, 10) # Gets last 10 activities of any type
+
+    # 2. Fetch Wellness Data for today
+    today = datetime.date.today().isoformat()
+    try:
+        stats = client.get_stats(today)
+        sleep_data = client.get_sleep_data(today)
+        hrv_data = client.get_hrv_data(today)
+        
+        sleep_score = sleep_data.get('dailySleepDTO', {}).get('sleepScore', 0)
+        hrv_val = hrv_data.get('hrvSummary', {}).get('lastNightAvg', 0)
+        rhr_val = stats.get('restingHeartRate', 0)
+    except:
+        sleep_score, hrv_val, rhr_val = 0, 0, 0
+
+    # 3. Process Activities
     new_entries = 0
-    for activity in running_activities:
+    for activity in all_activities:
         try:
-            # Parse activity date
-            activity_date = activity.get('startTimeLocal', '')[:10]  # Get YYYY-MM-DD
+            activity_date = activity.get('startTimeLocal', '')[:10]
             
-            # Skip if already in sheet
             if activity_date in existing_dates:
-                print(f"Skipping {activity_date} - already exists")
                 continue
             
             # Extract metrics
-            activity_name = activity.get('activityName', 'Run')
-            distance_meters = activity.get('distance', 0)
-            distance_km = round(distance_meters / 1000, 2) if distance_meters else 0
-            duration_seconds = activity.get('duration', 0)
-            duration_min = format_duration(duration_seconds)
-            avg_pace = format_pace(distance_meters, duration_seconds)
+            activity_name = activity.get('activityName', 'Activity')
+            distance_km = round(activity.get('distance', 0) / 1000, 2)
+            duration_min = round(activity.get('duration', 0) / 60, 1)
             avg_hr = activity.get('averageHR', 0) or 0
             max_hr = activity.get('maxHR', 0) or 0
             calories = activity.get('calories', 0) or 0
-            avg_cadence = activity.get('averageRunningCadenceInStepsPerMinute', 0) or 0
-            elevation_gain = round(activity.get('elevationGain', 0), 1) if activity.get('elevationGain') else 0
-            activity_type = activity.get('activityType', {}).get('typeKey', 'running')
+            activity_type = activity.get('activityType', {}).get('typeKey', 'other')
+
+            # Create the row matching your new headers
+            new_row = [
+                activity_date, activity_name, distance_km, duration_min, 
+                avg_hr, max_hr, calories, activity_type, 
+                sleep_score, hrv_val, rhr_val
+            ]
+            
+            sheet.append_row(new_row)
+            new_entries += 1
             
             # Prepare row
             row = [
